@@ -25,4 +25,4 @@ pnpm preview    # serves dist/ locally
 
 The dev server does not open a browser on its own. Use the URL Vite prints.
 
-There is no account, no telemetry, and no deploy configuration. Citation links are opened by the browser only when you choose them. The app does not fetch those URLs.
+There is no account and no telemetry. `netlify.toml` holds the deploy settings: Netlify runs `pnpm build` on Node 22 and publishes `dist/`. Citation links are opened by the browser only when you choose them. The app does not fetch those URLs.
