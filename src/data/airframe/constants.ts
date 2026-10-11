@@ -6,7 +6,7 @@ export const SCHEMATIC = {
   plugFractionForward: 0.5,
   superellipseN: 2.4,
   bodyStationSpacingM: 1.5,
-  radialSegments: 48,
+  radialSegments: 64,
   visualFrameSpacingM: 2,
   stringerCount: 12,
   wingRootChordM: 10.5,

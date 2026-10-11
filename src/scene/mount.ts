@@ -1,5 +1,4 @@
 import * as THREE from "three";
-import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { FLIGHT_PIVOT, flightBody, flightPose, hingePlacement } from "../shared/phase/index.ts";
 import { LAYER_IDS, type Assembly, type BBox, type MeshData, type PaneState, type Part, type Vec3 } from "../shared/types/index.ts";
 import { syncInspectCamera, syncOrthoCamera } from "./camera.ts";
@@ -31,6 +30,7 @@ import {
   vertexOpacityAttribute,
 } from "./materials.ts";
 import { UNKNOWN_PART, applyPartRaycast, type PartIntersection } from "./pick.ts";
+import { STAGE_BG, contactShadowTexture, createPostChain, studioEnvironment } from "./stage.ts";
 
 export interface SceneHandle {
   dispose: () => void;
@@ -57,6 +57,17 @@ export interface SceneBindings {
 }
 
 const EDGE_THRESHOLD_DEG = 20;
+const INTERIOR_LAYERS = [
+  "structure",
+  "composites",
+  "cabin",
+  "cargo",
+  "flightControls",
+  "fuel",
+  "hydraulics",
+  "electrics",
+  "bleedEcs",
+] as const;
 const HATCH_ID = "schematic-section-hatch";
 const ORBIT_SPEED = 0.005;
 const FRAME_RING = 120;
@@ -291,26 +302,26 @@ function turntableTexture(): THREE.CanvasTexture {
   canvas.height = size;
   const ctx = canvas.getContext("2d");
   if (ctx) {
-    ctx.fillStyle = "#1a1f26";
+    ctx.fillStyle = "#15191f";
     ctx.fillRect(0, 0, size, size);
     const c = size / 2;
     ctx.translate(c, c);
-    ctx.strokeStyle = "#5d6874";
+    ctx.strokeStyle = "#3a434e";
     ctx.lineWidth = 2;
     for (const radius of [150, 280, 400, 490]) {
       ctx.beginPath();
       ctx.arc(0, 0, radius, 0, Math.PI * 2);
       ctx.stroke();
     }
-    ctx.strokeStyle = "#6a6248";
-    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#4a4536";
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(-460, 0);
     ctx.lineTo(460, 0);
     ctx.moveTo(0, -400);
     ctx.lineTo(0, 400);
     ctx.stroke();
-    ctx.strokeStyle = "#46515c";
+    ctx.strokeStyle = "#333b45";
     ctx.lineWidth = 2;
     for (let i = 0; i < 72; i += 1) {
       const angle = (i / 72) * Math.PI * 2;
@@ -335,7 +346,7 @@ function runwayTexture(): THREE.CanvasTexture {
   if (ctx) {
     ctx.fillStyle = "#14181e";
     ctx.fillRect(0, 0, 1024, 128);
-    ctx.strokeStyle = "#8b939c";
+    ctx.strokeStyle = "#5c636b";
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(0, 10);
@@ -343,7 +354,7 @@ function runwayTexture(): THREE.CanvasTexture {
     ctx.moveTo(0, 118);
     ctx.lineTo(1024, 118);
     ctx.stroke();
-    ctx.strokeStyle = "#d5dbe2";
+    ctx.strokeStyle = "#7d858e";
     ctx.lineWidth = 3;
     ctx.setLineDash([16, 18]);
     ctx.beginPath();
@@ -377,25 +388,25 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
   renderer.localClippingEnabled = true;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.15;
+  renderer.toneMappingExposure = 1.05;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.setClearColor(0x06080b, 1);
+  renderer.setClearColor(STAGE_BG, 1);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.info.autoReset = false;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x06080b);
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const room = new RoomEnvironment();
-  const envMap = pmrem.fromScene(room, 0.04).texture;
+  scene.background = new THREE.Color(STAGE_BG);
+  const envMap = studioEnvironment(renderer);
   scene.environment = envMap;
-  scene.environmentIntensity = 0.18;
-  scene.environmentRotation.set(Math.PI / 2, 0, 0);
-  pmrem.dispose();
+  scene.environmentIntensity = 1;
+  // Linear fog, retuned every frame to sit beyond the aircraft. Ortho views push it out of range.
+  const fog = new THREE.Fog(STAGE_BG, 1e6, 1e6 + 1);
+  scene.fog = fog;
 
-  const hemi = new THREE.HemisphereLight(0xb7c3d1, 0x14161a, 0.52);
+  const hemi = new THREE.HemisphereLight(0xb7c3d1, 0x14161a, 0.4);
   scene.add(hemi);
-  const key = new THREE.DirectionalLight(0xfff3e6, 2.2);
+  const key = new THREE.DirectionalLight(0xfff3e6, 2.8);
   key.position.set(-24, 18, 30);
   key.castShadow = true;
   key.shadow.mapSize.set(2048, 2048);
@@ -409,13 +420,13 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
   key.shadow.normalBias = 0.045;
   scene.add(key);
   scene.add(key.target);
-  const fill = new THREE.DirectionalLight(0xc5d0dc, 1.05);
+  const fill = new THREE.DirectionalLight(0xc5d0dc, 2.6);
   fill.position.set(16, -28, 12);
   scene.add(fill);
-  const rim = new THREE.DirectionalLight(0xe4ebf4, 1.45);
+  const rim = new THREE.DirectionalLight(0xe4ebf4, 1.8);
   rim.position.set(36, -4, 20);
   scene.add(rim);
-  const rake = new THREE.DirectionalLight(0xf7f1e8, 0.7);
+  const rake = new THREE.DirectionalLight(0xf7f1e8, 0.25);
   rake.position.set(6, 42, 8);
   scene.add(rake);
 
@@ -435,12 +446,29 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
   scene.add(pad);
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(1400, 1400),
-    new THREE.MeshStandardMaterial({ color: 0x0b0d10, roughness: 1, metalness: 0 }),
+    new THREE.MeshStandardMaterial({ color: 0x08090b, roughness: 0.82, metalness: 0, envMapIntensity: 0.12 }),
   );
   ground.position.z = -5.22;
   ground.receiveShadow = true;
   blockPick(ground);
   scene.add(ground);
+  const shadowMap = contactShadowTexture();
+  const contactShadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({
+      map: shadowMap,
+      transparent: true,
+      opacity: 0.75,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
+  );
+  contactShadow.position.z = -5.06;
+  contactShadow.renderOrder = 1;
+  blockPick(contactShadow);
+  scene.add(contactShadow);
   const apron = new THREE.MeshStandardMaterial({ color: 0x14181e, roughness: 0.96, metalness: 0.02 });
   const taxiway = new THREE.Mesh(new THREE.PlaneGeometry(210, 16), apron);
   taxiway.position.set(-30, 40, -5.18);
@@ -475,12 +503,14 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
 
   const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 20000);
   const persp = new THREE.PerspectiveCamera(35, 1, 0.01, 20000);
+  const post = createPostChain(renderer, scene, ortho, persp);
   const sharedPlane = new THREE.Plane();
   const clipPlanes: THREE.Plane[] = [sharedPlane];
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
   const panRight = new THREE.Vector3();
   const panUp = new THREE.Vector3();
+  const focusPoint = new THREE.Vector3();
 
   pickRoot.name = "aircraft";
 
@@ -503,6 +533,7 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
   const rakeHome = rake.position.clone();
   const wheelSets: { mesh: THREE.InstancedMesh; base: THREE.Matrix4[] }[] = [];
   let geomKey = "";
+  const noseByVariant: Record<Part["variantId"], number> = { "a350-900": -33.4, "a350-1000": -36.89 };
   let hatchKey = "";
   let hatchTexture: THREE.CanvasTexture | null = null;
   let hoverId: string | null = null;
@@ -518,6 +549,7 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
   let frameWrite = 0;
   let lastNow = performance.now();
   let slowStreak = 0;
+  let occlusionAllowed = true;
 
   interface PointerGesture {
     pointerId: number;
@@ -644,13 +676,10 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
     if (!ghost && reveal && skinSlot) opacity = Math.min(opacity, REVEAL_OPACITY);
     const hex = finish === "livery" ? paintHex(variantId) : LAYER_COLOR_HEX[slotLayer(slot)];
     const offsetSkin = variantId === "a350-1000" && skinSlot;
-    const material = aircraftMaterial(
-      finish,
-      hex,
-      opacity,
-      activePlane(),
-      offsetSkin ? { polygonOffset: true } : undefined,
-    );
+    const material = aircraftMaterial(finish, hex, opacity, activePlane(), {
+      polygonOffset: offsetSkin,
+      noseX: noseByVariant[variantId],
+    });
     material.depthWrite = !ghost && opacity >= 0.9 && !differences;
     if (differences || opacity < 1) material.transparent = true;
     return material;
@@ -967,6 +996,7 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
   }
 
   function buildAircraft(assembly: Assembly, maskPane: PaneState, u: number, overlay: boolean): void {
+    noseByVariant[assembly.variantId] = -assembly.measures.lengthM / 2;
     const vis = bindings.getVisibility(assembly, maskPane);
     const solidIds = new Set(vis.solid);
     const ghostIds = new Set(vis.ghost);
@@ -1163,6 +1193,12 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
     rake.position.set(rakeHome.x + flightShift.x, rakeHome.y + flightShift.y, rakeHome.z + flightShift.z);
     key.target.position.copy(flightShift);
     key.target.updateMatrixWorld();
+    const ref = referenceBBox();
+    const altitude = Math.max(0, flightShift.z);
+    contactShadow.position.set(flightShift.x + (ref.min.x + ref.max.x) / 2, flightShift.y, -5.06);
+    contactShadow.rotation.z = body.yaw;
+    contactShadow.scale.set((ref.max.x - ref.min.x) * 1.04, (ref.max.y - ref.min.y) * 0.98, 1);
+    (contactShadow.material as THREE.MeshBasicMaterial).opacity = 0.75 * Math.max(0, 1 - altitude / 35);
     wheelRoll.makeRotationY(body.wheel);
     for (const set of wheelSets) {
       for (let i = 0; i < set.base.length; i += 1) {
@@ -1195,8 +1231,30 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
     if (w <= 0 || h <= 0) return;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    const ratio = Math.min(window.devicePixelRatio || 1, 1.5);
+    renderer.setPixelRatio(ratio);
     renderer.setSize(w, h, false);
+    post.setSize(w, h, ratio);
+  }
+
+  /** AO reads an unclipped depth and normal pass, so it only runs on the closed, opaque exterior. */
+  function occlusionOn(): boolean {
+    if (!occlusionAllowed) return false;
+    const pane = bindings.getPane();
+    if (pane.clip.axis !== "none" || bindings.getPeer() || pane.explode > 0.001) return false;
+    if (!pane.overlays.skin || pane.soloLayerId || pane.overlays.differences || pane.hiddenLines) return false;
+    return !INTERIOR_LAYERS.some((id) => pane.overlays[id]);
+  }
+
+  function syncFog(camera: THREE.Camera): void {
+    if (camera !== persp) {
+      fog.near = 1e6;
+      fog.far = 1e6 + 1;
+      return;
+    }
+    const distance = persp.position.distanceTo(focusPoint.copy(flightShift));
+    fog.near = distance + 15;
+    fog.far = distance + 210;
   }
 
   function pickAt(clientX: number, clientY: number): string | null {
@@ -1385,6 +1443,8 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
     if (avg > 20) {
       slowStreak += 1;
       if (slowStreak >= 60) hud.slow = true;
+      // A machine that cannot hold the frame rate keeps the bloom and loses the occlusion pass.
+      if (slowStreak >= 180) occlusionAllowed = false;
     } else {
       slowStreak = 0;
       hud.slow = false;
@@ -1418,7 +1478,8 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
       syncHatch();
       syncClip();
       const camera = syncCamera();
-      renderer.render(scene, camera);
+      syncFog(camera);
+      post.render(camera === persp ? persp : ortho, occlusionOn());
       hud.triangles = renderer.info.render.triangles;
       hud.calls = renderer.info.render.calls;
       renderer.info.reset();
@@ -1472,14 +1533,8 @@ export function mountScene(canvas: HTMLCanvasElement, bindings: SceneBindings): 
       envMap.dispose();
       padMap.dispose();
       runwayMap.dispose();
-      room.traverse((obj) => {
-        const mesh = obj as THREE.Mesh;
-        mesh.geometry?.dispose();
-        const material = mesh.material;
-        if (Array.isArray(material)) {
-          for (const item of material) item.dispose();
-        } else material?.dispose();
-      });
+      shadowMap.dispose();
+      post.dispose();
       renderer.dispose();
     },
   };

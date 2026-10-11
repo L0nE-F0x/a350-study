@@ -49,9 +49,10 @@ export function syncInspectCamera(
   const fov = 35;
   camera.fov = fov;
   camera.aspect = Math.max(aspect, 1e-4);
-  camera.near = 0.01;
-  camera.far = 20000;
+  const distance = Math.max(state.orbit.orthoHalfHeight / Math.tan(((fov * Math.PI) / 180) / 2), 1);
+  // A tight depth range keeps the ambient-occlusion pass, which reads depth, free of banding.
+  camera.near = Math.max(0.05, distance * 0.02);
+  camera.far = distance * 40 + 1000;
   camera.updateProjectionMatrix();
-  const distance = state.orbit.orthoHalfHeight / Math.tan(((fov * Math.PI) / 180) / 2);
-  applyBasis(camera, basis, state.orbit.target, Math.max(distance, 1));
+  applyBasis(camera, basis, state.orbit.target, distance);
 }

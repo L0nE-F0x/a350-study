@@ -49,8 +49,8 @@ export const LAYER_OPACITY: Record<LayerId, number> = {
 
 export type AircraftFinish = "livery" | "engine" | "metal" | "rubber" | "study";
 
-const PAINT_900 = "#343c44";
-const PAINT_1000 = "#403830";
+const PAINT_900 = "#42494f";
+const PAINT_1000 = "#504539";
 
 const lightLevels = {
   uNav: { value: 0 },
@@ -93,11 +93,19 @@ function bindClip(material: THREE.Material, plane: THREE.Plane | null): void {
 
 const LIVERY_COLOR = `
 vec3 p = vStudy;
+float bloomWeight = 0.0;
 vec3 base = diffuseColor.rgb;
 float belly = smoothstep(1.05, -0.8, p.z);
-base = mix(base, base * vec3(0.5, 0.52, 0.56), belly * 0.9);
+base = mix(base, base * vec3(0.66, 0.68, 0.72), belly * 0.8);
 float crown = smoothstep(2.4, 4.6, p.z);
-base = mix(base, min(base * 1.16, vec3(0.26, 0.28, 0.3)), crown * 0.55);
+base = mix(base, min(base * 1.1, vec3(0.28, 0.3, 0.32)), crown * 0.5);
+// The black cockpit mask that wraps the windshield and ends in a swept point aft.
+float dn = p.x - uNoseX;
+float maskHalf = 0.62 * (1.0 - smoothstep(3.85, 5.15, dn));
+float maskMid = 2.95 + 0.12 * (dn - 3.4) + (0.62 - maskHalf) * 0.8;
+float cockpit = smoothstep(1.7, 2.05, dn) * step(0.02, maskHalf);
+cockpit *= 1.0 - smoothstep(maskHalf - 0.04, maskHalf + 0.04, abs(p.z - maskMid));
+cockpit *= step(abs(p.y), 3.2);
 float dihedral = abs(p.y) * 0.0945;
 if (abs(p.y) > 3.8) {
   float lower = smoothstep(dihedral + 0.08, dihedral - 0.35, p.z);
@@ -106,11 +114,11 @@ if (abs(p.y) > 3.8) {
 if (vGlow < 0.5) {
   float body = smoothstep(3.55, 2.7, abs(p.y)) * smoothstep(5.1, 3.4, abs(p.z - 1.6));
   float frameDist = min(fract(p.x / 3.4), 1.0 - fract(p.x / 3.4));
-  float frameLine = 1.0 - smoothstep(0.0, 0.045, frameDist);
+  float frameLine = 1.0 - smoothstep(0.0, 0.028, frameDist);
   float ang = atan(p.z - 1.6, p.y);
   float seamDist = min(fract(ang * 0.95), 1.0 - fract(ang * 0.95));
-  float seamLine = 1.0 - smoothstep(0.0, 0.05, seamDist);
-  base *= mix(1.0, 0.34, body * max(frameLine, seamLine * 0.85));
+  float seamLine = 1.0 - smoothstep(0.0, 0.03, seamDist);
+  base *= mix(1.0, 0.86, body * max(frameLine, seamLine * 0.7));
   float span = abs(p.y);
   float wing = smoothstep(3.05, 3.9, span) * (1.0 - smoothstep(31.5, 32.45, span));
   wing *= smoothstep(2.6, 1.15, p.z) * smoothstep(-1.35, -0.05, p.z);
@@ -119,22 +127,32 @@ if (vGlow < 0.5) {
   float chordLine = 1.0 - smoothstep(0.0, 0.055, chordDist);
   float spanDist = min(fract(span / 3.8), 1.0 - fract(span / 3.8));
   float spanLine = 1.0 - smoothstep(0.0, 0.04, spanDist);
-  base *= mix(1.0, 0.36, wing * max(chordLine, spanLine));
+  base *= mix(1.0, 0.88, wing * max(chordLine, spanLine));
 }
-if (vGlow > 0.75 && vGlow < 1.5) base = vec3(0.86, 0.9, 0.94);
+base = mix(base, vec3(0.012, 0.013, 0.015), cockpit);
+if (vGlow > 0.75 && vGlow < 1.5) base = mix(vec3(0.55, 0.4, 0.24), vec3(0.02, 0.025, 0.03), step(0.5, cockpit));
 else if (vGlow > 1.5 && vGlow < 2.5) base = vec3(0.46, 0.48, 0.51);
 else if (vGlow > 6.5 && vGlow < 7.5) base = mix(base * 0.7, vec3(0.94, 0.95, 0.92), uLand);
 diffuseColor.rgb = base;
 `;
 
+// bloomWeight tags lamp and window pixels. It rides out in alpha, and the bloom pass reads it.
 const LIVERY_EMIT = `
-if (vGlow > 0.75 && vGlow < 1.5) totalEmissiveRadiance += vec3(1.45, 1.55, 1.65) * uCabin;
+if (vGlow > 0.75 && vGlow < 1.5) {
+  float lit = uCabin * (1.0 - step(0.5, cockpit));
+  totalEmissiveRadiance += vec3(1.9, 1.05, 0.45) * lit;
+  bloomWeight = 0.3 * lit;
+}
 else if (vGlow > 1.5 && vGlow < 2.5) totalEmissiveRadiance += vec3(0.1, 0.11, 0.12);
-else if (vGlow > 2.5 && vGlow < 3.5) totalEmissiveRadiance += vec3(4.2, 0.08, 0.05) * uNav;
-else if (vGlow > 3.5 && vGlow < 4.5) totalEmissiveRadiance += vec3(0.08, 3.6, 0.45) * uNav;
-else if (vGlow > 4.5 && vGlow < 5.5) totalEmissiveRadiance += vec3(4.4, 0.1, 0.06) * uBeacon;
-else if (vGlow > 5.5 && vGlow < 6.5) totalEmissiveRadiance += vec3(3.2, 3.05, 2.8) * max(uNav * 0.35, uStrobe);
-else if (vGlow > 6.5 && vGlow < 7.5) totalEmissiveRadiance += vec3(4.6, 4.3, 3.6) * uLand;
+else if (vGlow > 2.5 && vGlow < 3.5) { totalEmissiveRadiance += vec3(4.2, 0.08, 0.05) * uNav; bloomWeight = uNav; }
+else if (vGlow > 3.5 && vGlow < 4.5) { totalEmissiveRadiance += vec3(0.08, 3.6, 0.45) * uNav; bloomWeight = uNav; }
+else if (vGlow > 4.5 && vGlow < 5.5) { totalEmissiveRadiance += vec3(4.4, 0.1, 0.06) * uBeacon; bloomWeight = uBeacon; }
+else if (vGlow > 5.5 && vGlow < 6.5) {
+  float level = max(uNav * 0.35, uStrobe);
+  totalEmissiveRadiance += vec3(3.2, 3.05, 2.8) * level;
+  bloomWeight = level;
+}
+else if (vGlow > 6.5 && vGlow < 7.5) { totalEmissiveRadiance += vec3(4.6, 4.3, 3.6) * uLand; bloomWeight = uLand; }
 `;
 
 const LIVERY_UNIFORMS = `
@@ -143,6 +161,7 @@ uniform float uBeacon;
 uniform float uStrobe;
 uniform float uCabin;
 uniform float uLand;
+uniform float uNoseX;
 `;
 
 // World offsets match SCHEMATIC.engineXM / engineYM / engineZM. Nacelle mesh is centred on that point.
@@ -218,8 +237,8 @@ function emitBlock(finish: AircraftFinish): string {
   return "";
 }
 
-function bindAircraftShader(material: THREE.Material, finish: AircraftFinish): void {
-  material.customProgramCacheKey = () => `aircraft-${finish}-v4`;
+function bindAircraftShader(material: THREE.Material, finish: AircraftFinish, noseX: number): void {
+  material.customProgramCacheKey = () => `aircraft-${finish}-v6`;
   material.onBeforeCompile = (shader) => {
     const extra = varyBlock(finish);
     const assign = assignBlock(finish);
@@ -229,6 +248,7 @@ function bindAircraftShader(material: THREE.Material, finish: AircraftFinish): v
       shader.uniforms.uStrobe = lightLevels.uStrobe;
       shader.uniforms.uCabin = lightLevels.uCabin;
       shader.uniforms.uLand = lightLevels.uLand;
+      shader.uniforms.uNoseX = { value: noseX };
     }
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -255,7 +275,9 @@ function bindAircraftShader(material: THREE.Material, finish: AircraftFinish): v
       )
       .replace(
         "#include <opaque_fragment>",
-        "#include <opaque_fragment>\ngl_FragColor.a *= vPartOpacity;",
+        finish === "livery"
+          ? "#include <opaque_fragment>\ngl_FragColor.a *= vPartOpacity;\nif (gl_FragColor.a > 0.99) gl_FragColor.a = 1.0 + bloomWeight;"
+          : "#include <opaque_fragment>\ngl_FragColor.a *= vPartOpacity;",
       );
   };
 }
@@ -281,22 +303,25 @@ export function aircraftMaterial(
   hex: string,
   opacity: number,
   plane: THREE.Plane | null,
-  opts?: { polygonOffset?: boolean },
+  opts?: { polygonOffset?: boolean; noseX?: number },
 ): THREE.Material {
   let material: THREE.Material;
   if (finish === "livery") {
+    // Charcoal metallic under a clear coat, so the hangar strips run down the crown.
     const paint = physicalBase(hex, opacity);
-    paint.metalness = 0.2;
-    paint.roughness = 0.52;
-    paint.clearcoat = 0.4;
-    paint.clearcoatRoughness = 0.34;
-    paint.envMapIntensity = 0.42;
+    paint.metalness = 0.24;
+    paint.roughness = 0.42;
+    paint.clearcoat = 0.85;
+    paint.clearcoatRoughness = 0.1;
+    paint.envMapIntensity = 1;
     material = paint;
   } else if (finish === "engine") {
     const paint = physicalBase("#4a5158", opacity);
-    paint.metalness = 0.28;
-    paint.roughness = 0.46;
-    paint.clearcoat = 0.18;
+    paint.metalness = 0.4;
+    paint.roughness = 0.36;
+    paint.clearcoat = 0.6;
+    paint.clearcoatRoughness = 0.14;
+    paint.envMapIntensity = 0.95;
     material = paint;
   } else if (finish === "metal") {
     const paint = physicalBase("#8b939b", opacity);
@@ -330,7 +355,7 @@ export function aircraftMaterial(
     material.polygonOffsetUnits = -1;
   }
   bindClip(material, plane);
-  bindAircraftShader(material, finish);
+  bindAircraftShader(material, finish, opts?.noseX ?? -33.4);
   return material;
 }
 

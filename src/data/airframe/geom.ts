@@ -205,16 +205,44 @@ export function superellipseYZ(theta: number, scale: number, a: number, b: numbe
   };
 }
 
-export function appendSection(raw: Raw, xs: number[], scaleAt: (x: number) => number, a: number, b: number, n: number, zc: number, radial: number): void {
+/** Cross-section at one station: width scale, height scale, and the vertical shift of the section centre. */
+export interface SectionProfile {
+  sy: number;
+  sz: number;
+  dz: number;
+}
+
+export function sectionPoint(
+  theta: number,
+  profile: SectionProfile,
+  a: number,
+  b: number,
+  n: number,
+  zc: number,
+): { y: number; z: number } {
+  const unit = superellipseYZ(theta, 1, 1, 1, n, 0);
+  return { y: profile.sy * a * unit.y, z: zc + profile.dz + profile.sz * b * unit.z };
+}
+
+export function appendSection(
+  raw: Raw,
+  xs: number[],
+  profileAt: (x: number) => SectionProfile,
+  a: number,
+  b: number,
+  n: number,
+  zc: number,
+  radial: number,
+): void {
   const rings: number[][] = [];
   for (const x of xs) {
-    const scale = scaleAt(x);
+    const profile = profileAt(x);
     const ids: number[] = [];
-    if (scale <= 1e-8) {
-      ids.push(addVertex(raw, x, 0, zc));
+    if (Math.max(profile.sy, profile.sz) <= 1e-8) {
+      ids.push(addVertex(raw, x, 0, zc + profile.dz));
     } else {
       for (let i = 0; i < radial; i += 1) {
-        const p = superellipseYZ((i / radial) * Math.PI * 2, scale, a, b, n, zc);
+        const p = sectionPoint((i / radial) * Math.PI * 2, profile, a, b, n, zc);
         ids.push(addVertex(raw, x, p.y, p.z));
       }
     }

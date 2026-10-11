@@ -11,6 +11,7 @@ import {
   addWheel,
   appendSection,
   boxPart,
+  sectionPoint,
   finalize,
   finalizeLines,
   makePart,
@@ -20,6 +21,7 @@ import {
   rawMesh,
   stations,
   superellipseYZ,
+  type SectionProfile,
   type VariantId,
 } from "./geom.ts";
 import type { Hinge, Part, Vec3 } from "../../shared/types/index.ts";
@@ -63,19 +65,52 @@ function suffix(variant: VariantId): "900" | "1000" {
   return variant === "a350-900" ? "900" : "1000";
 }
 
-export function bodyScale(x: number, nose: number, c0: number, c1: number, tail: number): number {
-  if (x <= c0) {
-    const t = Math.min(1, Math.max(0, (x - nose) / (c0 - nose)));
-    // Blunt radome into the constant section. Endpoints stay 0 and 1.
-    return 1 - (1 - t) ** 1.65;
+/** The radome tip sits this fraction of the half-height below the fuselage axis. */
+const NOSE_TIP_DROP = 0.3;
+/** The tail-cone closure is centred this fraction of the half-height above the axis. */
+const TAIL_TIP_RISE = 0.42;
+/** Spec closure is 0.15 of the section at the tail tip, not a point. */
+const TAIL_CLOSURE = 0.15;
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * Schematic cross-section along the body. The nose droops to a low radome tip and the
+ * tail cone sweeps its belly up to a raised closure, so neither end is a symmetric bullet.
+ * Top and bottom are fractions of the half-height measured from the fuselage axis.
+ */
+export function bodyProfile(x: number, ends: { nose: number; c0: number; c1: number; tail: number }): SectionProfile {
+  if (x <= ends.c0) {
+    const u = 1 - clamp01((x - ends.nose) / (ends.c0 - ends.nose));
+    const top = -NOSE_TIP_DROP + (1 + NOSE_TIP_DROP) * Math.sqrt(1 - u ** 2.6);
+    const bottom = NOSE_TIP_DROP + (1 - NOSE_TIP_DROP) * Math.sqrt(1 - u ** 1.8);
+    return { sy: Math.sqrt(1 - u ** 2.2), sz: (top + bottom) / 2, dz: (B * (top - bottom)) / 2 };
   }
-  if (x >= c1) {
-    const t = Math.min(1, Math.max(0, (x - c1) / (tail - c1)));
-    const eased = t * t * (3 - 2 * t);
-    // Spec closure is 0.15 of the section at the tail tip, not a point.
-    return 1 + (0.15 - 1) * eased;
+  if (x >= ends.c1) {
+    const t = clamp01((x - ends.c1) / (ends.tail - ends.c1));
+    const top = 1 - (1 - TAIL_TIP_RISE - TAIL_CLOSURE) * t ** 2.2;
+    const bottom = 1 - (1 + TAIL_TIP_RISE - TAIL_CLOSURE) * t ** 1.25;
+    return { sy: 1 - (1 - TAIL_CLOSURE) * t ** 1.5, sz: (top + bottom) / 2, dz: (B * (top - bottom)) / 2 };
   }
-  return 1;
+  return { sy: 1, sz: 1, dz: 0 };
+}
+
+function fullSection(x: number, ends: ReturnType<typeof sectionEnds>): boolean {
+  return x >= ends.c0 - 1e-6 && x <= ends.c1 + 1e-6;
+}
+
+function profileSize(x: number, ends: ReturnType<typeof sectionEnds>): number {
+  const profile = bodyProfile(x, ends);
+  return Math.min(profile.sy, profile.sz);
+}
+
+/** Stations packed toward one end, where the profile curves hardest. */
+function packedStations(from: number, to: number, count: number, power: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i <= count; i += 1) out.push(from + (to - from) * (i / count) ** power);
+  return out;
 }
 
 function sectionEnds(length: number): { nose: number; c0: number; c1: number; tail: number } {
@@ -88,10 +123,13 @@ function sectionEnds(length: number): { nose: number; c0: number; c1: number; ta
   };
 }
 
-function skinPoint(x: number, theta: number, scale: number): { x: number; y: number; z: number } {
-  const p = superellipseYZ(theta, scale, A, B, N, ZC);
+function skinAt(x: number, theta: number, ends: ReturnType<typeof sectionEnds>): { x: number; y: number; z: number } {
+  const p = sectionPoint(theta, bodyProfile(x, ends), A, B, N, ZC);
   return { x, y: p.y, z: p.z };
 }
+
+/** Lit windows sit just proud of the skin. A recess would hide them under the continuous skin. */
+const WINDOW_PROUD = -0.012;
 
 function addPocket(
   raw: ReturnType<typeof rawMesh>,
@@ -143,7 +181,6 @@ function appendOpenings(
   xs: number[],
   ends: ReturnType<typeof sectionEnds>,
 ): void {
-  const scaleAt = (x: number) => bodyScale(x, ends.nose, ends.c0, ends.c1, ends.tail);
   const x0 = xs[0];
   const x1 = xs[xs.length - 1];
   if (x0 === undefined || x1 === undefined) return;
@@ -153,18 +190,18 @@ function appendOpenings(
     const pitch = 0.54;
     const halfWindow = 0.13;
     for (let x = Math.ceil((lo + halfWindow) / pitch) * pitch; x <= hi - halfWindow; x += pitch) {
-      if (scaleAt(x) < 0.995) continue;
+      if (!fullSection(x, ends)) continue;
       for (const side of [1, -1] as const) {
         const theta = side > 0 ? 0.78 : Math.PI - 0.78;
         addPocket(
           raw,
           [
-            skinPoint(x - 0.13, theta - 0.1, 1),
-            skinPoint(x + 0.13, theta - 0.1, 1),
-            skinPoint(x + 0.13, theta + 0.1, 1),
-            skinPoint(x - 0.13, theta + 0.1, 1),
+            skinAt(x - 0.13, theta - 0.1, ends),
+            skinAt(x + 0.13, theta - 0.1, ends),
+            skinAt(x + 0.13, theta + 0.1, ends),
+            skinAt(x - 0.13, theta + 0.1, ends),
           ],
-          0.05,
+          WINDOW_PROUD,
           1,
         );
       }
@@ -178,10 +215,10 @@ function appendOpenings(
         addPocket(
           raw,
           [
-            skinPoint(x - 0.42, theta - 0.42, 1),
-            skinPoint(x + 0.42, theta - 0.42, 1),
-            skinPoint(x + 0.42, theta + 0.55, 1),
-            skinPoint(x - 0.42, theta + 0.55, 1),
+            skinAt(x - 0.42, theta - 0.42, ends),
+            skinAt(x + 0.42, theta - 0.42, ends),
+            skinAt(x + 0.42, theta + 0.55, ends),
+            skinAt(x - 0.42, theta + 0.55, ends),
           ],
           0.07,
           2,
@@ -192,17 +229,16 @@ function appendOpenings(
   if (id === "fuse.nose") {
     for (const side of [1, -1] as const) {
       const x = ends.nose + 3.4;
-      const scale = scaleAt(x);
       const theta = side > 0 ? 0.55 : Math.PI - 0.55;
       addPocket(
         raw,
         [
-          skinPoint(x - 0.35, theta - 0.25, scale),
-          skinPoint(x + 0.55, theta - 0.2, scaleAt(x + 0.55)),
-          skinPoint(x + 0.45, theta + 0.28, scaleAt(x + 0.45)),
-          skinPoint(x - 0.4, theta + 0.22, scale),
+          skinAt(x - 0.35, theta - 0.25, ends),
+          skinAt(x + 0.55, theta - 0.2, ends),
+          skinAt(x + 0.45, theta + 0.28, ends),
+          skinAt(x - 0.4, theta + 0.22, ends),
         ],
-        0.04,
+        WINDOW_PROUD,
         1,
       );
     }
@@ -214,9 +250,9 @@ function addRingGroove(
   x: number,
   halfWidth: number,
   depth: number,
-  scale: number,
+  ends: ReturnType<typeof sectionEnds>,
 ): void {
-  if (scale < 0.35) return;
+  if (profileSize(x, ends) < 0.35) return;
   const count = 18;
   for (let i = 0; i < count; i += 1) {
     const t0 = (i / count) * Math.PI * 2;
@@ -224,10 +260,10 @@ function addRingGroove(
     addPocket(
       raw,
       [
-        skinPoint(x - halfWidth, t0, scale),
-        skinPoint(x + halfWidth, t0, scale),
-        skinPoint(x + halfWidth, t1, scale),
-        skinPoint(x - halfWidth, t1, scale),
+        skinAt(x - halfWidth, t0, ends),
+        skinAt(x + halfWidth, t0, ends),
+        skinAt(x + halfWidth, t1, ends),
+        skinAt(x - halfWidth, t1, ends),
       ],
       depth,
     );
@@ -240,15 +276,16 @@ function addStringerGroove(
   x0: number,
   x1: number,
   depth: number,
+  ends: ReturnType<typeof sectionEnds>,
 ): void {
   const dTheta = 0.018;
   addPocket(
     raw,
     [
-      skinPoint(x0, theta - dTheta, 1),
-      skinPoint(x1, theta - dTheta, 1),
-      skinPoint(x1, theta + dTheta, 1),
-      skinPoint(x0, theta + dTheta, 1),
+      skinAt(x0, theta - dTheta, ends),
+      skinAt(x1, theta - dTheta, ends),
+      skinAt(x1, theta + dTheta, ends),
+      skinAt(x0, theta + dTheta, ends),
     ],
     depth,
   );
@@ -261,7 +298,6 @@ function appendSkinStructure(
   xs: number[],
   ends: ReturnType<typeof sectionEnds>,
 ): void {
-  const scaleAt = (x: number) => bodyScale(x, ends.nose, ends.c0, ends.c1, ends.tail);
   const x0 = xs[0];
   const x1 = xs[xs.length - 1];
   if (x0 === undefined || x1 === undefined) return;
@@ -270,7 +306,7 @@ function appendSkinStructure(
   const halfFrame = 0.016;
   const pitch = 4.5;
   for (let x = Math.ceil((lo + halfFrame) / pitch) * pitch; x <= hi - halfFrame + 1e-9; x += pitch) {
-    addRingGroove(raw, x, halfFrame, 0.03, scaleAt(x));
+    addRingGroove(raw, x, halfFrame, 0.03, ends);
   }
   if (id.startsWith("fuse.body") || id.startsWith("fuse.plug")) {
     const thetas = [0.55, 1.02, Math.PI / 2, -0.95];
@@ -280,8 +316,8 @@ function appendSkinStructure(
       for (let x = lo + 0.08; x < hi - 0.3; x += seg) {
         const end = Math.min(hi - 0.08, x + seg - 0.12);
         if (end - x < 0.45) continue;
-        if (scaleAt(x) < 0.995 || scaleAt(end) < 0.995) continue;
-        addStringerGroove(raw, theta, x, end, 0.02);
+        if (!fullSection(x, ends) || !fullSection(end, ends)) continue;
+        addStringerGroove(raw, theta, x, end, 0.02, ends);
       }
     }
     const cabin = ends.c1 - ends.c0;
@@ -295,10 +331,10 @@ function appendSkinStructure(
       addPocket(
         raw,
         [
-          skinPoint(x - halfX, theta - 0.28, 1),
-          skinPoint(x + halfX, theta - 0.28, 1),
-          skinPoint(x + halfX, theta + 0.42, 1),
-          skinPoint(x - halfX, theta + 0.42, 1),
+          skinAt(x - halfX, theta - 0.28, ends),
+          skinAt(x + halfX, theta - 0.28, ends),
+          skinAt(x + halfX, theta + 0.42, ends),
+          skinAt(x - halfX, theta + 0.42, ends),
         ],
         0.06,
         2,
@@ -310,22 +346,22 @@ function appendSkinStructure(
     paintLast(raw, 8, 5);
   }
   if (id === "fuse.tail") {
-    addBox(raw, ends.tail - 0.35, 0, ZC + 0.15, 0.16, 0.16, 0.16);
+    addBox(raw, ends.tail - 0.35, 0, ZC + bodyProfile(ends.tail - 0.35, ends).dz, 0.16, 0.16, 0.16);
     paintLast(raw, 8, 6);
   }
   if (id === "fuse.nose") {
     const radome = ends.nose + 1.2;
-    if (radome - 0.02 >= lo && radome + 0.02 <= hi) addRingGroove(raw, radome, 0.018, 0.028, scaleAt(radome));
+    if (radome - 0.02 >= lo && radome + 0.02 <= hi) addRingGroove(raw, radome, 0.018, 0.028, ends);
     const x = ends.nose + 2.7;
     if (x - 0.4 >= lo && x + 0.55 <= hi) {
       const theta = Math.PI / 2;
       addPocket(
         raw,
         [
-          skinPoint(x - 0.4, theta - 0.42, scaleAt(x - 0.4)),
-          skinPoint(x + 0.55, theta - 0.38, scaleAt(x + 0.55)),
-          skinPoint(x + 0.4, theta + 0.42, scaleAt(x + 0.4)),
-          skinPoint(x - 0.45, theta + 0.38, scaleAt(x - 0.45)),
+          skinAt(x - 0.4, theta - 0.42, ends),
+          skinAt(x + 0.55, theta - 0.38, ends),
+          skinAt(x + 0.4, theta + 0.42, ends),
+          skinAt(x - 0.45, theta + 0.38, ends),
         ],
         0.04,
         1,
@@ -334,7 +370,7 @@ function appendSkinStructure(
     const lampX = ends.nose + 4.4;
     if (lampX - 0.16 >= lo && lampX + 0.16 <= hi) {
       for (const theta of [-1.25, Math.PI + 1.25] as const) {
-        const at = skinPoint(lampX, theta, scaleAt(lampX));
+        const at = skinAt(lampX, theta, ends);
         addBox(raw, at.x, at.y, at.z - 0.05, 0.55, 0.24, 0.12);
         paintLast(raw, 8, 7);
       }
@@ -353,7 +389,7 @@ function fuselagePart(
   quantityIds: string[],
 ): Part {
   const raw = rawMesh();
-  appendSection(raw, xs, (x) => bodyScale(x, ends.nose, ends.c0, ends.c1, ends.tail), A, B, N, ZC, RADIAL);
+  appendSection(raw, xs, (x) => bodyProfile(x, ends), A, B, N, ZC, RADIAL);
   appendOpenings(raw, id, xs, ends);
   appendSkinStructure(raw, id, xs, ends);
   return makePart(variant, {
@@ -374,11 +410,42 @@ export function buildFuselage(variant: VariantId, length: number): Part[] {
   const key = suffix(variant);
   const lenIds = [`q.len.${key}`, "q.fuseWidth"];
   return [
-    fuselagePart(variant, "fuse.nose", "Nose cone", stations(ends.nose, ends.c0, step), ends, "structure", "shifted", lenIds),
+    fuselagePart(variant, "fuse.nose", "Nose cone", packedStations(ends.nose, ends.c0, 30, 1.8), ends, "structure", "shifted", lenIds),
     fuselagePart(variant, "fuse.body.fwd", "Forward fuselage", stations(ends.c0, 0, step), ends, "skin", "common", lenIds),
     fuselagePart(variant, "fuse.body.aft", "Aft fuselage", stations(0, ends.c1, step), ends, "skin", "common", lenIds),
-    fuselagePart(variant, "fuse.tail", "Tail cone", stations(ends.c1, ends.tail, step), ends, "structure", "shifted", lenIds),
+    fuselagePart(variant, "fuse.tail", "Tail cone", stations(ends.c1, ends.tail, 0.5), ends, "structure", "shifted", lenIds),
+    buildFairing(variant),
   ];
+}
+
+/** Schematic wing-body fairing, registered on the wing so both variants share it. */
+const FAIRING = { x0: -6, x1: 15, drop: 0.45, widen: 0.07 } as const;
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = clamp01((x - edge0) / (edge1 - edge0));
+  return t * t * (3 - 2 * t);
+}
+
+/** A bulged section that sits inside the fuselage at both ends, so only the belly shows. */
+function fairingProfile(x: number): SectionProfile {
+  const t = clamp01((x - FAIRING.x0) / (FAIRING.x1 - FAIRING.x0));
+  const bulge = smoothstep(0, 0.22, t) * (1 - smoothstep(0.58, 1, t));
+  return { sy: 0.97 + FAIRING.widen * bulge, sz: 0.97 + 0.02 * bulge, dz: -FAIRING.drop * bulge };
+}
+
+function buildFairing(variant: VariantId): Part {
+  const raw = rawMesh();
+  appendSection(raw, stations(FAIRING.x0, FAIRING.x1, 0.5), fairingProfile, A, B, N, ZC, RADIAL);
+  return makePart(variant, {
+    id: "fuse.fairing",
+    name: "Wing-body fairing",
+    layerId: "skin",
+    explodeGroup: "skin",
+    position: { x: 0, y: 0, z: 0 },
+    mesh: finalize(raw),
+    quantityIds: [],
+    diffTag: "common",
+  });
 }
 
 export function buildPlugs(variant: VariantId): Part[] {
@@ -746,44 +813,104 @@ export function buildTeExtensions(variant: VariantId): Part[] {
   return parts;
 }
 
-function appendPlanform(
+/** Schematic fin, -900 frame. Only the tip height is published, through the overall height. */
+const FIN = {
+  rootZ: 3.3,
+  rootLe: 19.6,
+  rootChord: 9.4,
+  tipLe: 26.2,
+  tipChord: 3.3,
+  rootThick: 0.4,
+  tipThick: 0.14,
+} as const;
+
+/** Schematic horizontal tail, -900 frame. Swept, with dihedral, mounted on the tail cone. */
+const HTP = {
+  z: 2.5,
+  rootLe: 24.4,
+  rootChord: 6,
+  tipChord: 2,
+  semi: 9.4,
+  leSweep: 0.62,
+  dihedral: 0.1,
+  rootThick: 0.28,
+  tipThick: 0.09,
+} as const;
+
+interface AirfoilStation {
+  le: Vec3;
+  chord: number;
+  thick: number;
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function finStation(f: number): AirfoilStation {
+  return {
+    le: { x: lerp(FIN.rootLe, FIN.tipLe, f), y: 0, z: lerp(FIN.rootZ, SCHEMATIC.finTipZ, f) },
+    chord: lerp(FIN.rootChord, FIN.tipChord, f),
+    thick: lerp(FIN.rootThick, FIN.tipThick, f),
+  };
+}
+
+function htpStation(y: number): AirfoilStation {
+  const yAbs = Math.abs(y);
+  const f = yAbs / HTP.semi;
+  return {
+    le: { x: HTP.rootLe + yAbs * HTP.leSweep, y, z: HTP.z + yAbs * HTP.dihedral },
+    chord: lerp(HTP.rootChord, HTP.tipChord, f),
+    thick: lerp(HTP.rootThick, HTP.tipThick, f),
+  };
+}
+
+/** Cosine spacing rounds the leading edge without extra span rows. */
+function chordStep(j: number, count: number): number {
+  return (1 - Math.cos((Math.PI * j) / count)) / 2;
+}
+
+/**
+ * Closed airfoil surface. `at` walks the span from 0 to 1. Thickness goes along `axis`.
+ * Chord fractions `c0` to `c1` let control surfaces reuse the same stations.
+ */
+function appendAirfoil(
   raw: ReturnType<typeof rawMesh>,
-  y0: number,
-  y1: number,
-  qcX: number,
-  rootChord: number,
-  tipChord: number,
-  z: number,
-  thick: number,
+  spanSteps: number,
+  at: (f: number) => AirfoilStation,
+  axis: "y" | "z",
+  c0 = 0,
+  c1 = 1,
+  chordSteps = 12,
 ): void {
-  const spanQuads = 8;
-  const chordQuads = 6;
-  const span = Math.abs(y1 - y0) || 1;
   const grids: number[][][] = [];
-  for (const zSign of [1, -1] as const) {
+  for (const sign of [1, -1] as const) {
     const grid: number[][] = [];
-    for (let i = 0; i <= spanQuads; i += 1) {
-      const y = y0 + ((y1 - y0) * i) / spanQuads;
-      const chord = rootChord + (tipChord - rootChord) * (Math.abs(y - y0) / span);
-      const le = qcX - 0.25 * chord;
+    for (let i = 0; i <= spanSteps; i += 1) {
+      const station = at(i / spanSteps);
       const row: number[] = [];
-      for (let j = 0; j <= chordQuads; j += 1) {
-        const f = j / chordQuads;
-        row.push(addVertex(raw, le + chord * f, y, z + zSign * thick * airfoilShape(f)));
+      for (let j = 0; j <= chordSteps; j += 1) {
+        const c = c0 + (c1 - c0) * chordStep(j, chordSteps);
+        const offset = sign * station.thick * airfoilShape(c);
+        row.push(
+          addVertex(
+            raw,
+            station.le.x + station.chord * c,
+            station.le.y + (axis === "y" ? offset : 0),
+            station.le.z + (axis === "z" ? offset : 0),
+          ),
+        );
       }
       grid.push(row);
     }
-    for (let i = 0; i < spanQuads; i += 1) {
-      for (let j = 0; j < chordQuads; j += 1) {
-        const row = grid[i];
-        const next = grid[i + 1];
-        if (!row || !next) continue;
-        const a = row[j];
-        const b = row[j + 1];
-        const c = next[j];
-        const d = next[j + 1];
+    for (let i = 0; i < spanSteps; i += 1) {
+      for (let j = 0; j < chordSteps; j += 1) {
+        const a = grid[i]?.[j];
+        const b = grid[i]?.[j + 1];
+        const c = grid[i + 1]?.[j];
+        const d = grid[i + 1]?.[j + 1];
         if (a === undefined || b === undefined || c === undefined || d === undefined) continue;
-        if (zSign > 0) {
+        if (sign > 0) {
           addTri(raw, a, c, b);
           addTri(raw, b, c, d);
         } else {
@@ -797,22 +924,19 @@ function appendPlanform(
   const upper = grids[0];
   const lower = grids[1];
   if (!upper || !lower) return;
-  const stitchRow = (rowA: number[] | undefined, rowB: number[] | undefined) => {
-    if (!rowA || !rowB) return;
-    for (let j = 0; j < chordQuads; j += 1) {
-      const a = rowA[j];
-      const b = rowA[j + 1];
-      const c = rowB[j];
-      const d = rowB[j + 1];
+  for (const i of [0, spanSteps]) {
+    for (let j = 0; j < chordSteps; j += 1) {
+      const a = upper[i]?.[j];
+      const b = upper[i]?.[j + 1];
+      const c = lower[i]?.[j];
+      const d = lower[i]?.[j + 1];
       if (a === undefined || b === undefined || c === undefined || d === undefined) continue;
       addTri(raw, a, c, b);
       addTri(raw, b, c, d);
     }
-  };
-  stitchRow(upper[0], lower[0]);
-  stitchRow(upper[spanQuads], lower[spanQuads]);
-  for (const j of [0, chordQuads]) {
-    for (let i = 0; i < spanQuads; i += 1) {
+  }
+  for (const j of [0, chordSteps]) {
+    for (let i = 0; i < spanSteps; i += 1) {
       const a = upper[i]?.[j];
       const b = upper[i + 1]?.[j];
       const c = lower[i]?.[j];
@@ -827,65 +951,11 @@ function appendPlanform(
 export function buildEmpennage(variant: VariantId): Part[] {
   const key = suffix(variant);
   const h = rawMesh();
-  appendPlanform(h, 0, 10, 28, 4, 1.5, 4.8, 0.12);
-  appendPlanform(h, 0, -10, 28, 4, 1.5, 4.8, 0.12);
+  for (const side of [1, -1] as const) {
+    appendAirfoil(h, 10, (f) => htpStation(side * f * HTP.semi), "z");
+  }
   const fin = rawMesh();
-  const z0 = 2.2;
-  const z1 = SCHEMATIC.finTipZ;
-  const nz = 10;
-  const nc = 6;
-  const finGrids: number[][][] = [];
-  for (const ySign of [1, -1] as const) {
-    const grid: number[][] = [];
-    for (let i = 0; i <= nz; i += 1) {
-      const f = i / nz;
-      const z = z0 + (z1 - z0) * f;
-      const chord = 3 + (1.4 - 3) * f;
-      const le = 30 + 1.2 * f;
-      const thick = 0.18 * (1 - f) + 0.03 * f;
-      const row: number[] = [];
-      for (let j = 0; j <= nc; j += 1) {
-        const c = j / nc;
-        row.push(addVertex(fin, le + chord * c, ySign * thick * airfoilShape(c), z));
-      }
-      grid.push(row);
-    }
-    for (let i = 0; i < nz; i += 1) {
-      for (let j = 0; j < nc; j += 1) {
-        const row = grid[i];
-        const next = grid[i + 1];
-        if (!row || !next) continue;
-        const a = row[j];
-        const b = row[j + 1];
-        const c = next[j];
-        const d = next[j + 1];
-        if (a === undefined || b === undefined || c === undefined || d === undefined) continue;
-        if (ySign > 0) {
-          addTri(fin, a, c, b);
-          addTri(fin, b, c, d);
-        } else {
-          addTri(fin, a, b, c);
-          addTri(fin, b, d, c);
-        }
-      }
-    }
-    finGrids.push(grid);
-  }
-  const finStar = finGrids[0];
-  const finPort = finGrids[1];
-  if (finStar && finPort) {
-    for (const j of [0, nc]) {
-      for (let i = 0; i < nz; i += 1) {
-        const a = finStar[i]?.[j];
-        const b = finStar[i + 1]?.[j];
-        const c = finPort[i]?.[j];
-        const d = finPort[i + 1]?.[j];
-        if (a === undefined || b === undefined || c === undefined || d === undefined) continue;
-        addTri(fin, a, b, c);
-        addTri(fin, b, d, c);
-      }
-    }
-  }
+  appendAirfoil(fin, 12, finStation, "y");
   return [
     makePart(variant, {
       id: "htail",
@@ -1481,6 +1551,10 @@ function ringLines(x: number, scale: number): number[] {
   return positions;
 }
 
+function inset(profile: SectionProfile): SectionProfile {
+  return { sy: profile.sy * 0.98, sz: profile.sz * 0.98, dz: profile.dz };
+}
+
 export function buildStructure(variant: VariantId, length: number): Part[] {
   const ends = sectionEnds(length);
   const parts: Part[] = [];
@@ -1508,8 +1582,8 @@ export function buildStructure(variant: VariantId, length: number): Part[] {
       const x0 = xs[i];
       const x1 = xs[i + 1];
       if (x0 === undefined || x1 === undefined) continue;
-      const p0 = superellipseYZ(theta, bodyScale(x0, ends.nose, ends.c0, ends.c1, ends.tail) * 0.98, A, B, N, ZC);
-      const p1 = superellipseYZ(theta, bodyScale(x1, ends.nose, ends.c0, ends.c1, ends.tail) * 0.98, A, B, N, ZC);
+      const p0 = sectionPoint(theta, inset(bodyProfile(x0, ends)), A, B, N, ZC);
+      const p1 = sectionPoint(theta, inset(bodyProfile(x1, ends)), A, B, N, ZC);
       pushLine(stringers, { x: x0, y: p0.y, z: p0.z }, { x: x1, y: p1.y, z: p1.z });
     }
   }
@@ -1903,78 +1977,41 @@ function addSkinControl(
   );
 }
 
+const RUDDER_SPAN = [0.08, 0.94] as const;
+const ELEVATOR_SPAN = [1.4, HTP.semi - 0.35] as const;
+const CONTROL_CHORD = [0.72, 0.99] as const;
+
+function shifted(station: AirfoilStation, origin: Vec3): AirfoilStation {
+  return {
+    ...station,
+    le: { x: station.le.x - origin.x, y: station.le.y - origin.y, z: station.le.z - origin.z },
+  };
+}
+
+function rudderOrigin(): Vec3 {
+  const mid = finStation((RUDDER_SPAN[0] + RUDDER_SPAN[1]) / 2);
+  return { x: mid.le.x + mid.chord * 0.85, y: 0, z: mid.le.z };
+}
+
+function elevatorOrigin(): Vec3 {
+  const mid = htpStation((ELEVATOR_SPAN[0] + ELEVATOR_SPAN[1]) / 2);
+  return { x: mid.le.x + mid.chord * 0.85, y: 0, z: mid.le.z };
+}
+
 function rudderMesh(): ReturnType<typeof finalize> {
-  const origin = { x: 32.2, y: 0, z: 7.2 };
+  const origin = rudderOrigin();
   const raw = rawMesh();
-  const steps = 6;
-  const zStart = 3.8;
-  const zEnd = 11.05;
-  for (const ySign of [1, -1] as const) {
-    const rowA: number[] = [];
-    const rowB: number[] = [];
-    for (let i = 0; i <= steps; i += 1) {
-      const f = i / steps;
-      const z = zStart + (zEnd - zStart) * f;
-      const spanF = Math.min(1, Math.max(0, (z - 2.2) / (SCHEMATIC.finTipZ - 2.2)));
-      const chord = 3 + (1.4 - 3) * spanF;
-      const le = 30 + 1.2 * spanF;
-      const thick = (0.055 * (1 - spanF) + 0.02) * ySign;
-      rowA.push(addVertex(raw, le + chord * 0.7 - origin.x, thick, z - origin.z));
-      rowB.push(addVertex(raw, le + chord * 0.98 - origin.x, thick * 0.35, z - origin.z));
-    }
-    for (let i = 0; i < steps; i += 1) {
-      const a = rowA[i];
-      const b = rowB[i];
-      const c = rowA[i + 1];
-      const d = rowB[i + 1];
-      if (a === undefined || b === undefined || c === undefined || d === undefined) continue;
-      if (ySign > 0) {
-        addTri(raw, a, c, b);
-        addTri(raw, b, c, d);
-      } else {
-        addTri(raw, a, b, c);
-        addTri(raw, b, d, c);
-      }
-    }
-  }
+  const [f0, f1] = RUDDER_SPAN;
+  appendAirfoil(raw, 6, (f) => shifted(finStation(lerp(f0, f1, f)), origin), "y", CONTROL_CHORD[0], CONTROL_CHORD[1], 3);
   return finalize(raw);
 }
 
 function elevatorMesh(): ReturnType<typeof finalize> {
-  const origin = { x: 30.2, y: 0, z: 4.8 };
+  const origin = elevatorOrigin();
   const raw = rawMesh();
-  const bands: Array<[number, number]> = [
-    [-8.6, -1.35],
-    [1.35, 8.6],
-  ];
-  for (const [y0, y1] of bands) {
-    const steps = 4;
-    for (const zSign of [1, -1] as const) {
-      const rowA: number[] = [];
-      const rowB: number[] = [];
-      for (let i = 0; i <= steps; i += 1) {
-        const y = y0 + ((y1 - y0) * i) / steps;
-        const spanF = Math.min(1, Math.abs(y) / 10);
-        const chord = 4 + (1.5 - 4) * spanF;
-        const le = 28 - 0.25 * chord;
-        rowA.push(addVertex(raw, le + chord * 0.66 - origin.x, y - origin.y, zSign * 0.04));
-        rowB.push(addVertex(raw, le + chord * 0.98 - origin.x, y - origin.y, zSign * 0.015));
-      }
-      for (let i = 0; i < steps; i += 1) {
-        const a = rowA[i];
-        const b = rowB[i];
-        const c = rowA[i + 1];
-        const d = rowB[i + 1];
-        if (a === undefined || b === undefined || c === undefined || d === undefined) continue;
-        if (zSign > 0) {
-          addTri(raw, a, c, b);
-          addTri(raw, b, c, d);
-        } else {
-          addTri(raw, a, b, c);
-          addTri(raw, b, d, c);
-        }
-      }
-    }
+  const [y0, y1] = ELEVATOR_SPAN;
+  for (const side of [1, -1] as const) {
+    appendAirfoil(raw, 4, (f) => shifted(htpStation(side * lerp(y0, y1, f)), origin), "z", CONTROL_CHORD[0], CONTROL_CHORD[1], 3);
   }
   return finalize(raw);
 }
@@ -2018,7 +2055,7 @@ export function buildControls(variant: VariantId): Part[] {
       name: "Schematic rudder",
       layerId: "flightControls",
       explodeGroup: "structure.empennage",
-      position: { x: 32.2, y: 0, z: 7.2 },
+      position: rudderOrigin(),
       mesh: rudderMesh(),
       quantityIds: ["q.schematic.control"],
       diffTag: "common",
@@ -2030,7 +2067,7 @@ export function buildControls(variant: VariantId): Part[] {
       name: "Schematic elevator",
       layerId: "flightControls",
       explodeGroup: "structure.empennage",
-      position: { x: 30.2, y: 0, z: 4.8 },
+      position: elevatorOrigin(),
       mesh: elevatorMesh(),
       quantityIds: ["q.schematic.control"],
       diffTag: "common",
